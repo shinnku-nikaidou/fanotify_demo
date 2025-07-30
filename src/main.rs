@@ -4,6 +4,8 @@ use std::os::unix::fs::PermissionsExt;
 // fanotify constants and structures
 const FAN_CLASS_NOTIF: u32 = 0;
 const FAN_CLOEXEC: u32 = 0x00000001;
+const FAN_REPORT_FID: u32 = 0x00000200;  // Required for FAN_ATTRIB since Linux 5.1
+const FAN_REPORT_DIR_FID: u32 = 0x00000400;  // Optional: for parent directory handles
 
 const FAN_OPEN: u64 = 0x00000001;
 const FAN_CLOSE_WRITE: u64 = 0x00000008;
@@ -104,11 +106,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Initialize fanotify with raw system call
-    println!("DEBUG: Initializing fanotify with FAN_CLASS_NOTIF and O_RDONLY...");
+    println!("DEBUG: Initializing fanotify with FAN_CLASS_NOTIF, FAN_REPORT_FID and O_RDONLY...");
     println!("DEBUG: FAN_CLASS_NOTIF = {}", FAN_CLASS_NOTIF);
+    println!("DEBUG: FAN_REPORT_FID = {} (REQUIRED for FAN_ATTRIB since Linux 5.1)", FAN_REPORT_FID);
+    println!("DEBUG: FAN_CLOEXEC = {}", FAN_CLOEXEC);
     println!("DEBUG: libc::O_RDONLY = {}", libc::O_RDONLY);
     
-    let fanotify_fd = unsafe { fanotify_init(FAN_CLASS_NOTIF | FAN_CLOEXEC, libc::O_RDONLY as u32) };
+    // CRITICAL FIX: Add FAN_REPORT_FID for FAN_ATTRIB support
+    let fanotify_fd = unsafe { 
+        fanotify_init(
+            FAN_CLASS_NOTIF | FAN_CLOEXEC | FAN_REPORT_FID, 
+            libc::O_RDONLY as u32
+        ) 
+    };
     
     if fanotify_fd == -1 {
         let errno = get_errno();
@@ -170,6 +180,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("=== METADATA MONITORING SETUP ===");
     println!("🎯 PRIMARY GOAL: Monitor file metadata changes (FAN_ATTRIB)");
+    println!("🔧 CRITICAL FIX APPLIED: Added FAN_REPORT_FID for FAN_ATTRIB support!");
+    println!("   Linux 5.1+ requires FAN_REPORT_FID for file handle identification");
+    println!("   This enables FAN_ATTRIB and other directory entry events");
     println!("DEBUG: mask_metadata_focused = 0x{:x} (ATTRIB priority)", mask_metadata_focused);
     println!("DEBUG: mask_fallback = 0x{:x} (without ATTRIB)", mask_fallback);
     println!("🔧 FAN_ATTRIB monitors these metadata operations:");
@@ -196,19 +209,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let actual_mask = if mark_result == -1 {
         let errno = get_errno();
-        println!("❌ CRITICAL: Failed to enable FAN_ATTRIB metadata monitoring: errno = {}", errno);
+        println!("❌ Failed to enable FAN_ATTRIB metadata monitoring: errno = {}", errno);
         match errno {
             libc::EINVAL => {
-                println!("💔 EINVAL - FAN_ATTRIB is NOT supported on this kernel!");
-                println!("   Kernel requirement: Linux 5.1+ for FAN_ATTRIB on files");
-                println!("   Current kernel may be too old for metadata monitoring");
+                println!("💔 EINVAL - This should be FIXED now with FAN_REPORT_FID!");
+                println!("   If still failing, check kernel version (need Linux 5.1+)");
+                println!("   or file system support for file handles");
             }
             libc::EPERM => {
-                println!("🔒 EPERM - Insufficient privileges for FAN_ATTRIB metadata monitoring");
-                println!("   FAN_ATTRIB requires CAP_SYS_ADMIN capability");
+                println!("🔒 EPERM - Need root privileges or CAP_SYS_ADMIN");
+            }
+            libc::ENOTDIR => {
+                println!("📁 ENOTDIR - File handle not supported on this filesystem");
             }
             _ => {
-                println!("🚫 Other error preventing metadata monitoring: errno {}", errno);
+                println!("🚫 Other error: errno {}", errno);
             }
         }
         
