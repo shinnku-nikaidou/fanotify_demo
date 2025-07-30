@@ -1,5 +1,5 @@
 use nix::sys::fanotify::{EventFFlags, Fanotify, InitFlags, MarkFlags, MaskFlags};
-use std::{fs, os::unix::io::AsRawFd, path::Path};
+use std::{fs, os::unix::io::AsRawFd};
 use nix::unistd::close;
 
 fn main() -> nix::Result<()> {
@@ -13,19 +13,32 @@ fn main() -> nix::Result<()> {
 
     println!("Successfully initialized fanotify");
 
-    // Monitor file attribute and metadata change events
-    let mask = MaskFlags::FAN_ATTRIB | MaskFlags::FAN_MODIFY | MaskFlags::FAN_CREATE | MaskFlags::FAN_DELETE;
+    // Monitor file attribute and metadata change events - start with basic events
+    let mask = MaskFlags::FAN_OPEN | MaskFlags::FAN_MODIFY | MaskFlags::FAN_CLOSE_WRITE;
 
-    // Monitor /tmp directory - pass the fanotify instance itself as fd for directory monitoring
-    fan.mark(
+    // Monitor /tmp directory - open the directory first to get a proper file descriptor
+    let tmp_dir = match std::fs::File::open("/tmp") {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("Failed to open /tmp directory: {}", e);
+            return Err(nix::errno::Errno::ENOENT);
+        }
+    };
+    match fan.mark(
         MarkFlags::FAN_MARK_ADD,
         mask,
-        &fan,
-        Some(Path::new("/tmp")),
-    )?;
+        &tmp_dir,
+        None::<&std::path::Path>, // Use None when providing a file descriptor
+    ) {
+        Ok(_) => println!("Successfully marked /tmp directory for monitoring"),
+        Err(e) => {
+            eprintln!("Failed to mark /tmp directory: {}", e);
+            return Err(e);
+        }
+    }
 
     println!("Starting to listen for filesystem events...");
-    println!("Event types being monitored: ATTRIB, MODIFY, CREATE, DELETE");
+    println!("Event types being monitored: OPEN, MODIFY, CLOSE_WRITE");
     println!("Press Ctrl+C to exit the program");
 
     loop {
@@ -49,17 +62,14 @@ fn main() -> nix::Result<()> {
             };
 
             // Print different information based on event type
-            if mask.contains(MaskFlags::FAN_ATTRIB) {
-                println!("[ATTRIB] pid={} {} - File attributes/metadata changed", pid, path_info);
+            if mask.contains(MaskFlags::FAN_OPEN) {
+                println!("[OPEN] pid={} {} - File opened", pid, path_info);
             }
             if mask.contains(MaskFlags::FAN_MODIFY) {
                 println!("[MODIFY] pid={} {} - File content modified", pid, path_info);
             }
-            if mask.contains(MaskFlags::FAN_CREATE) {
-                println!("[CREATE] pid={} {} - File/directory created", pid, path_info);
-            }
-            if mask.contains(MaskFlags::FAN_DELETE) {
-                println!("[DELETE] pid={} {} - File/directory deleted", pid, path_info);
+            if mask.contains(MaskFlags::FAN_CLOSE_WRITE) {
+                println!("[CLOSE_WRITE] pid={} {} - Writable file closed", pid, path_info);
             }
         }
     }
